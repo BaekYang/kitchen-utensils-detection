@@ -1,0 +1,4 @@
+여기에다 
+frame_1.jpg
+frame_1.json
+이렇게 넣으면 됩니다
