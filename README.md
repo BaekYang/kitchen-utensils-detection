@@ -1,4 +1,4 @@
-# 간단설명서
+# 간단설명서 (made by JeongEun)
 
 1. 준비 : data 폴더를 만들고 그 안에 train, val, test 폴더를 형성한다. 그리고 그 밑에 images폴더를 만든다.
 2. images폴더 안에는 png나 jpg파일, 그리고 그 파일에 대응하는 json파일을 넣는다. 이때 확장명 빼고 파일이름은 꼭 일치시킨다.
