@@ -5,7 +5,7 @@
 
 3. 얌파일 만들기 : data.py를 돌려서 json을 yaml로 바꾼다.
 
-4. 레이블 형성 : data 폴더 안의 train, val, test 폴더 하위로 label 폴더를 만든다. yolo로 읽을 txt파일들이다.
+4. 레이블 형성 : label.py를 돌린다. data 폴더 안의 train, val, test 폴더 하위로 label 폴더를 만든다. yolo로 읽을 txt파일들이다.
 
 5. 학습시작 train.py 를 시작한다.
 pt파일완성.
