@@ -19,7 +19,7 @@ cuda 12.1을 추천한다. 컴퓨터 사양에 따라 다르지만,
 Pytorch, numpy, 싸이킷런, ultralytics 등등.. 
 gpt한테 질문을 통해 cuda 12.1에 맞게 설치하는것을 가장 추천한다.
 
-그.런.데. Zed depth camera를 쓴다면 아래와 같이 깔도록.
+그.런.데. 
 if you use Depth Camera, You should use Numpy == 1.23.5 (Zed 2i / sdk 4.2 / CUDA 11.8)
 
 8. 최소 이미지 개수 :
