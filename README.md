@@ -19,6 +19,9 @@ cuda 12.1을 추천한다. 컴퓨터 사양에 따라 다르지만,
 Pytorch, numpy, 싸이킷런, ultralytics 등등.. 
 gpt한테 질문을 통해 cuda 12.1에 맞게 설치하는것을 가장 추천한다.
 
+그.런.데. Zed depth camera를 쓴다면 아래와 같이 깔도록.
+if you use Depth Camera, You should use Numpy == 1.23.5 (Zed 2i / sdk 4.2 / CUDA 11.8)
+
 8. 최소 이미지 개수 :
 휴리스틱한 부분이기 때문에 확답할순 없다.
 다만 한 레이블(디텍션할 물체 개수)당
@@ -32,3 +35,5 @@ test 100장
 본인의 재량껏 추가하면 된다.
 https://docs.ultralytics.com/ko
 읽어보면 기능을 손쉽게 추가할 수 있다.
+
+
