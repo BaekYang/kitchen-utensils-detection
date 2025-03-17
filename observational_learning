@@ -36,7 +36,7 @@ def perform_person_inference(image_np):
                 detections.append({"keypoints": person_kps})
     return detections
 
-def get_right_hand_keypoint(detection):
+def get_right_hand_keypoint(detection, keypoint):
     """
     COCO 기준 인덱스에서 오른쪽 손목은 보통 10번에 해당합니다.
     detection["keypoints"]는 shape (num_keypoints, 3)이며,
@@ -46,12 +46,12 @@ def get_right_hand_keypoint(detection):
     keypoints = detection.get("keypoints", None)
     print("keypoints",keypoints)
     if keypoints is not None and keypoints.shape[0] > 10:
-        x, y, conf = keypoints[12]
+        x, y, conf = keypoints[keypoint]
         return (int(x),int(y)), conf
     return None, None
 
 
-def visualize_inference_results(image_np, detections, frame_count):
+def visualize_inference_results(image_np, detections, frame_count, keypoint):
     """
     인퍼런스 결과를 원본 이미지에 그려 시각화합니다.
     - image_np: 원본 이미지 (numpy 배열, BGR 형식)
@@ -65,7 +65,7 @@ def visualize_inference_results(image_np, detections, frame_count):
             # 모든 keypoints를 그리기 (신뢰도 0.5 이상)
             keypoints = detection.get("keypoints", None)
             if keypoints is not None:
-                right_hand_keypoint, conf = get_right_hand_keypoint(detection)
+                right_hand_keypoint, conf = get_right_hand_keypoint(detection, keypoint)
                 
                 if right_hand_keypoint is not None and conf > 0.5:
                     x_pixel, y_pixel = right_hand_keypoint
@@ -89,7 +89,7 @@ def visualize_inference_results(image_np, detections, frame_count):
 
     return image_np  # 원본 이미지는 그대로 반환
 
-def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visualize):
+def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visualize, keypoint):
     """
     한 프레임을 캡처하여 인퍼런스 수행, 시각화 (옵션) 및 CSV 저장을 처리합니다.
     반환값: (continue_flag, updated_frame_count)
@@ -119,7 +119,7 @@ def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visuali
     # CSV 기록 및 콘솔 출력: 각 검출된 사람에 대해 오른손 키포인트 처리
     if detections is not None:
         for detection in detections:
-            keypoint = get_right_hand_keypoint(detection)
+            keypoint = get_right_hand_keypoint(detection, keypoint)
             if keypoint is not None:
                 #print("Right hand keypoint:", keypoint)
                 right_hand_keypoint, conf = keypoint
@@ -139,7 +139,7 @@ def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visuali
     visualize=True
     if visualize:
         
-        image_np = visualize_inference_results(image_np, detections, frame_count)
+        image_np = visualize_inference_results(image_np, detections, frame_count, keypoint)
         cv2.imshow("InfResultserence ", image_np)
         if cv2.waitKey(1) & 0xFF == 27:  # ESC 키 입력 시 종료
             return False, frame_count
@@ -148,7 +148,7 @@ def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visuali
     time.sleep(1 / fps)
     return True, frame_count
 
-def main():
+def main(keypoint, output_path="output.csv"):
     parser = argparse.ArgumentParser()
     parser.add_argument('--input_svo_file', type=str, required=True, help='Path to the input SVO file')
     parser.add_argument('--fps', type=int, default=30, help='Frames per second to process')
@@ -172,7 +172,7 @@ def main():
     runtime_parameters = sl.RuntimeParameters()
     
     # Open CSV file (columns: timestamp, x, y, z, p, r, l)
-    csv_file = open("output.csv", "w", newline="")
+    csv_file = open(output_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(["timestamp", "x", "y", "z", "p", "r", "l"])
     
@@ -180,7 +180,7 @@ def main():
     continue_processing = True
     try:
         while continue_processing:
-            continue_processing, frame_count = process_frame(zed, runtime_parameters, args.fps, csv_writer, frame_count, args.visualize==True)
+            continue_processing, frame_count = process_frame(zed, runtime_parameters, args.fps, csv_writer, frame_count, args.visualize==True, keypoint)
     except KeyboardInterrupt:
         print("Processing stopped by user.")
     finally:
@@ -190,4 +190,6 @@ def main():
         print("Processing complete. Total frames processed:", frame_count)
 
 if __name__ == "__main__":
-    main()
+    output_path = "output.csv"
+    keypoint = 12
+    main(keypoint,output_path)
