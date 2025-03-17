@@ -82,21 +82,22 @@ def visualize_inference_results(image_np, detections, frame_count):
             keypoints = detection.get("keypoints", None)
             if keypoints is not None:
                 left_wrist = keypoints[9][:2]  # 왼손목
-                right_wrist = keypoints[10][:2]  # 오른손목
+                # right_wrist = keypoints[10][:2]  # 오른손목
 
                 # Mediapipe Hands로 손 keypoints 검출
-                for wrist in [left_wrist, right_wrist]:
+                for wrist in [left_wrist]: #, right_wrist]:
                     hand_landmarks = detect_hand_with_mediapipe(image_np, wrist)
                     if hand_landmarks:
                         for (hx, hy) in hand_landmarks:
-                            cv2.circle(image_np, (hx, hy), 5, (0, 255, 0), -1)  # 초록색 점
+                            cv2.circle(image_copy, (hx, hy), 5, (0, 255, 0), -1)  # 초록색 점
 
                 # 손목 위치 시각화 (빨간색 원)
-                cv2.circle(image_np, (int(left_wrist[0]), int(left_wrist[1])), 5, (0, 0, 255), -1)
-                cv2.circle(image_np, (int(right_wrist[0]), int(right_wrist[1])), 5, (0, 0, 255), -1)
+                cv2.circle(image_copy, (int(left_wrist[0]), int(left_wrist[1])), 5, (0, 0, 255), -1)
+                # cv2.circle(image_copy, (int(right_wrist[0]), int(right_wrist[1])), 5, (0, 0, 255), -1)
     
     # 프레임 번호를 이미지에 출력
     cv2.putText(image_copy, f"Frame: {frame_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+    
 
     # 이미지를 띄우기 (원본 이미지는 건들지 않고 시각화된 이미지만 띄움)
     cv2.imshow("YOLOv8-Pose + Mediapipe Hands", image_copy)
@@ -177,7 +178,7 @@ def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visuali
     time.sleep(1 / fps)
     return True, frame_count
 
-def main(output_path="output.csv"):
+def main(visualize, output_path="output.csv"):
     parser = argparse.ArgumentParser()
     parser.add_argument('--input_svo_file', type=str, required=True, help='Path to the input SVO file')
     parser.add_argument('--fps', type=int, default=30, help='Frames per second to process')
@@ -209,7 +210,7 @@ def main(output_path="output.csv"):
     continue_processing = True
     try:
         while continue_processing:
-            continue_processing, frame_count = process_frame(zed, runtime_parameters, args.fps, csv_writer, frame_count, args.visualize==True)
+            continue_processing, frame_count = process_frame(zed, runtime_parameters, args.fps, csv_writer, frame_count, visualize==True)
     except KeyboardInterrupt:
         print("Processing stopped by user.")
     finally:
@@ -220,5 +221,5 @@ def main(output_path="output.csv"):
 
 if __name__ == "__main__":
     output_path = "output.csv"
-
-    main(output_path)
+    visualize = True
+    main(visualize, output_path)
