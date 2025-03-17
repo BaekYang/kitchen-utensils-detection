@@ -1,0 +1,193 @@
+import pyzed.sl as sl
+import math
+import numpy as np
+import sys
+import time
+import argparse
+from ultralytics import YOLO
+import csv
+import cv2
+
+# 전역에서 YOLO 포즈 모델 로드 (모델 파일 경로를 실제 파일로 대체)
+pose_model = YOLO("C:/Users/PDI/Downloads/yolov8n-pose.pt")
+
+def perform_person_inference(image_np):
+    """
+    입력 이미지(numpy 배열, BGR 형식)에서 사람을 검출하고, 각 사람의 keypoints 정보를 반환합니다.
+    반환 예시:
+      [
+        {"keypoints": np.array([[x1, y1, conf1], [x2, y2, conf2], ..., [xN, yN, confN]])},
+        ...
+      ]
+    """
+    # 이미지가 BGRA 형식이면 BGR로 변환
+    if image_np.shape[2] == 4:
+        image_rgb = image_np[:, :, :3]  # BGRA -> BGR 변환
+        print("Converted image shape:", image_rgb.shape)
+    else:
+        image_rgb = image_np
+    results = pose_model.predict(image_rgb, conf=0.5)
+    detections = []
+    for result in results:
+        if result.keypoints is not None:
+            # keypoints의 shape: (num_person, num_keypoints, 3)
+            keypoints = result.keypoints.data.cpu().numpy() if hasattr(result.keypoints, 'cpu') else result.keypoints
+            for person_kps in keypoints:
+                detections.append({"keypoints": person_kps})
+    return detections
+
+def get_right_hand_keypoint(detection):
+    """
+    COCO 기준 인덱스에서 오른쪽 손목은 보통 10번에 해당합니다.
+    detection["keypoints"]는 shape (num_keypoints, 3)이며,
+    여기서 10번 인덱스의 앞 두 값(x, y)을 반환합니다.
+    """
+
+    keypoints = detection.get("keypoints", None)
+    print("keypoints",keypoints)
+    if keypoints is not None and keypoints.shape[0] > 10:
+        x, y, conf = keypoints[12]
+        return (int(x),int(y)), conf
+    return None, None
+
+
+def visualize_inference_results(image_np, detections, frame_count):
+    """
+    인퍼런스 결과를 원본 이미지에 그려 시각화합니다.
+    - image_np: 원본 이미지 (numpy 배열, BGR 형식)
+    - detections: perform_person_inference()의 결과
+    - frame_count: 현재 프레임 번호 (디버그용 텍스트 표시)
+    """
+    image_copy = image_np.copy()  # 원본 이미지를 복사하여 수정하지 않도록 함
+
+    if detections is not None:
+        for detection in detections:
+            # 모든 keypoints를 그리기 (신뢰도 0.5 이상)
+            keypoints = detection.get("keypoints", None)
+            if keypoints is not None:
+                right_hand_keypoint, conf = get_right_hand_keypoint(detection)
+                
+                if right_hand_keypoint is not None and conf > 0.5:
+                    x_pixel, y_pixel = right_hand_keypoint
+                    print(f"Right hand at ({x_pixel}, {y_pixel})")
+
+                    if x_pixel is not None and y_pixel is not None:
+                        x_pixel = int(round(x_pixel))  # 반올림 후 정수로 변환
+                        y_pixel = int(round(y_pixel)) 
+
+                    # 오른손목 위치에 빨간색 원을 그리기
+                        cv2.circle(image_np, (int(x_pixel), int(y_pixel)), 5, (0, 0, 255), -1)
+
+                    #err, point_cloud_value = point_cloud.get_value(x_pixel, y_pixel)
+    
+    # 프레임 번호를 이미지에 출력
+    cv2.putText(image_copy, f"Frame: {frame_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+
+    # 이미지를 띄우기 (원본 이미지는 건들지 않고 시각화된 이미지만 띄움)
+    cv2.imshow("Inference Results", image_copy)
+    cv2.waitKey(1)  # 1ms 기다리면서 이미지 띄우기
+
+    return image_np  # 원본 이미지는 그대로 반환
+
+def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visualize):
+    """
+    한 프레임을 캡처하여 인퍼런스 수행, 시각화 (옵션) 및 CSV 저장을 처리합니다.
+    반환값: (continue_flag, updated_frame_count)
+    """
+    grab_status = zed.grab(runtime_parameters)
+    if grab_status == sl.ERROR_CODE.END_OF_SVOFILE_REACHED:  # 사용 중인 SDK에 따라 END_OF_SVOFILE_REACHED일 수도 있음
+        print("End of SVO file reached.")
+        return False, frame_count
+    elif grab_status != sl.ERROR_CODE.SUCCESS:
+        print("Error during grab:", grab_status)
+        return False, frame_count
+
+    image = sl.Mat()
+    depth = sl.Mat()
+    point_cloud = sl.Mat()
+
+    zed.retrieve_image(image, sl.VIEW.LEFT)
+    zed.retrieve_measure(depth, sl.MEASURE.DEPTH)
+    zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
+
+    # Convert image to numpy array for OpenCV (BGR 형식)
+    image_np = image.get_data()
+
+    # Perform person inference on the image
+    detections = perform_person_inference(image_np)
+
+    # CSV 기록 및 콘솔 출력: 각 검출된 사람에 대해 오른손 키포인트 처리
+    if detections is not None:
+        for detection in detections:
+            keypoint = get_right_hand_keypoint(detection)
+            if keypoint is not None:
+                #print("Right hand keypoint:", keypoint)
+                right_hand_keypoint, conf = keypoint
+                if right_hand_keypoint is not None and conf > 0.5:  # keypoint가 None이 아니고, 신뢰도 0.5 이상일 때
+                    x_pixel, y_pixel = right_hand_keypoint
+                    x_pixel = int(round(x_pixel))  # 반올림 후 정수로 변환
+                    y_pixel = int(round(y_pixel)) 
+                    err, point_cloud_value = point_cloud.get_value(x_pixel, y_pixel)
+                    if math.isfinite(point_cloud_value[2]):
+                        distance = math.sqrt(point_cloud_value[0]**2 + point_cloud_value[1]**2 + point_cloud_value[2]**2)
+                        print(f"Frame {frame_count}: Right hand at ({x_pixel}, {y_pixel}) -> X: {point_cloud_value[0]:.3f}, Y: {point_cloud_value[1]:.3f}, Z: {point_cloud_value[2]:.3f}, Distance: {distance:.3f}")
+                        csv_writer.writerow([time.time(), point_cloud_value[0], point_cloud_value[1], point_cloud_value[2], 0, 0, 0])
+                    else:
+                        print(f"Frame {frame_count}: Invalid 3D coordinate for right hand at ({x_pixel}, {y_pixel})")
+                else: print("아잉")
+    # 시각화 옵션이 활성화 되어 있다면, 결과를 그려서 보여줌
+    visualize=True
+    if visualize:
+        
+        image_np = visualize_inference_results(image_np, detections, frame_count)
+        cv2.imshow("InfResultserence ", image_np)
+        if cv2.waitKey(1) & 0xFF == 27:  # ESC 키 입력 시 종료
+            return False, frame_count
+
+    frame_count += 1
+    time.sleep(1 / fps)
+    return True, frame_count
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input_svo_file', type=str, required=True, help='Path to the input SVO file')
+    parser.add_argument('--fps', type=int, default=30, help='Frames per second to process')
+    parser.add_argument('--visualize', action='store_true', help='Flag to enable visualization of inference results')
+    args = parser.parse_args()
+    
+    print("Starting 3D Coordinate Extraction from SVO file")
+    
+    # Create a Camera object and initialize with SVO file
+    zed = sl.Camera()
+    init_params = sl.InitParameters()
+    init_params.depth_mode = sl.DEPTH_MODE.ULTRA
+    init_params.coordinate_units = sl.UNIT.MILLIMETER
+    init_params.set_from_svo_file(args.input_svo_file)
+    
+    status = zed.open(init_params)
+    if status != sl.ERROR_CODE.SUCCESS:
+        print("Camera Open:", repr(status), ". Exit program.")
+        sys.exit(1)
+    
+    runtime_parameters = sl.RuntimeParameters()
+    
+    # Open CSV file (columns: timestamp, x, y, z, p, r, l)
+    csv_file = open("output.csv", "w", newline="")
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow(["timestamp", "x", "y", "z", "p", "r", "l"])
+    
+    frame_count = 0
+    continue_processing = True
+    try:
+        while continue_processing:
+            continue_processing, frame_count = process_frame(zed, runtime_parameters, args.fps, csv_writer, frame_count, args.visualize==True)
+    except KeyboardInterrupt:
+        print("Processing stopped by user.")
+    finally:
+        csv_file.close()
+        zed.close()
+        cv2.destroyAllWindows()
+        print("Processing complete. Total frames processed:", frame_count)
+
+if __name__ == "__main__":
+    main()
