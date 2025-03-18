@@ -8,6 +8,7 @@ from ultralytics import YOLO
 import csv
 import cv2
 import mediapipe as mp
+from CoordinateTransform import transform_camera_to_robot, calculate_T, set_points
 
 # YOLOv8-Pose 모델 로드
 pose_model = YOLO("C:/Users/PDI/Downloads/yolov8n-pose.pt")
@@ -105,11 +106,30 @@ def visualize_inference_results(image_np, detections, frame_count):
 
     return image_np  # 원본 이미지는 그대로 반환
 
+def save_hand_data(csv_writer, wrist_pos, hand_pos):
+    """
+    손목 좌표와 손 좌표를 받아서 CSV 파일에 저장.
+    """
+    timestamp = time.time()
+    vector = (
+        hand_pos[0] - wrist_pos[0],
+        hand_pos[1] - wrist_pos[1],
+        hand_pos[2] - wrist_pos[2]
+    )
+
+    csv_writer.writerow([timestamp, *wrist_pos, *hand_pos, *vector])
+
+    print(f"저장됨: 손목 {wrist_pos}, 손 {hand_pos}, 벡터 {vector}")
+
 def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visualize):
     """
     한 프레임을 캡처하여 인퍼런스 수행, 시각화 (옵션) 및 CSV 저장을 처리합니다.
     반환값: (continue_flag, updated_frame_count)
     """
+    #좌표 변환 위한 설정
+    camera_points, robot_points = set_points() # 카메라 좌표와 로봇 좌표 설정
+    T = calculate_T(camera_points, robot_points) # 아핀 변환 행렬 계산
+
     grab_status = zed.grab(runtime_parameters)
     if grab_status == sl.ERROR_CODE.END_OF_SVOFILE_REACHED:  # 사용 중인 SDK에 따라 END_OF_SVOFILE_REACHED일 수도 있음
         print("End of SVO file reached.")
@@ -144,13 +164,13 @@ def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visuali
                     x_pixel, y_pixel = int(wrist[0]), int(wrist[1])
 
                     # 손목 3D 좌표 추출
-                    err, point_cloud_value = point_cloud.get_value(x_pixel, y_pixel)
-                    if err == sl.ERROR_CODE.SUCCESS and math.isfinite(point_cloud_value[2]):
-                        x_3d, y_3d, z_3d = point_cloud_value[:3]
-                        print(f"Frame {frame_count}: Wrist at ({x_pixel}, {y_pixel}) -> X: {x_3d:.3f}, Y: {y_3d:.3f}, Z: {z_3d:.3f}")
+                    err, wrist_3d = point_cloud.get_value(x_pixel, y_pixel)
+                    if err == sl.ERROR_CODE.SUCCESS and math.isfinite(wrist_3d[2]):
+                        wrist_robot = transform_camera_to_robot(wrist_3d[:3], T)
+                        
 
-                        # CSV 파일에 기록
-                        csv_writer.writerow([time.time(), x_3d, y_3d, z_3d, 0, 0, 0])
+                        print(f"Frame {frame_count}: Wrist at ({x_pixel}, {y_pixel}) -> X: {wrist_robot[0]:.3f}, Y: {wrist_robot[1]:.3f}, Z: {wrist_robot[2]:.3f}")
+                    
                         # Mediapipe로 손 검출
                         hand_landmarks = detect_hand_with_mediapipe(image_np, wrist)
                         if hand_landmarks:
@@ -159,13 +179,14 @@ def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visuali
                             hand_y = np.mean([hy for hx, hy in hand_landmarks])
 
                             # 손 중심의 3D 좌표 가져오기
-                            err, point_cloud_value = point_cloud.get_value(int(hand_x), int(hand_y))
-                            if err == sl.ERROR_CODE.SUCCESS and math.isfinite(point_cloud_value[2]):
-                                hand_x3d, hand_y3d, hand_z3d = point_cloud_value[:3]
-                                print(f"   → Hand Center: X: {hand_x3d:.3f}, Y: {hand_y3d:.3f}, Z: {hand_z3d:.3f}")
+                            err, hand_3d = point_cloud.get_value(int(hand_x), int(hand_y))
+                            if err == sl.ERROR_CODE.SUCCESS and math.isfinite(hand_3d[2]):
+                                hand_robot = transform_camera_to_robot(hand_3d[:3], T)
 
-                                # 손 중심 좌표 CSV 저장
-                                csv_writer.writerow([time.time(), "hand", hand_x3d, hand_y3d, hand_z3d])
+                                # CSV 저장
+                                save_hand_data(csv_writer, wrist_robot, hand_robot)
+                                print(f"Frame {frame_count}: Wrist {wrist_robot} → Hand {hand_robot}")
+
 
                     else:
                         print(f"Frame {frame_count}: Invalid 3D coordinate for wrist at ({x_pixel}, {y_pixel})")
@@ -204,7 +225,7 @@ def main(visualize, output_path="output.csv"):
     # Open CSV file (columns: timestamp, x, y, z, p, r, l)
     csv_file = open(output_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(["timestamp", "x", "y", "z", "p", "r", "l"])
+    csv_writer.writerow(["Timestamp", "WX", "WY", "WZ", "HX", "HY", "HZ", "VX", "VY", "VZ"])
     
     frame_count = 0
     continue_processing = True
