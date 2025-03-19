@@ -1,246 +1,108 @@
-import pyzed.sl as sl
-import math
-import numpy as np
-import sys
-import time
-import argparse
-from ultralytics import YOLO
+import os
 import csv
-import cv2
-import mediapipe as mp
-from CoordinateTransform import transform_camera_to_robot, calculate_T, set_points
+import torch
+import argparse
+import data_utils
+import numpy as np
+from tqdm import tqdm
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from data_utils import XArmDataset
 
-# YOLOv8-Pose 모델 로드
-pose_model = YOLO("C:/Users/PDI/Downloads/yolov8n-pose.pt")
+dtype = torch.float
 
-# Mediapipe Hands 설정
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.5)
-mp_draw = mp.solutions.drawing_utils
+# LSTM 모델 정의
+class SimpleLearner(nn.Module): 
+    def __init__(self, args):
+        super(SimpleLearner, self).__init__()
+        self.hidden_size = args.hidden_size
 
-def perform_person_inference(image_np):
-    """
-    입력 이미지(numpy 배열, BGR 형식)에서 사람을 검출하고, 각 사람의 keypoints 정보를 반환합니다.
-    반환 예시:
-      [
-        {"keypoints": np.array([[x1, y1, conf1], [x2, y2, conf2], ..., [xN, yN, confN]])},
-        ...
-      ]
-    """
-    # 이미지가 BGRA 형식이면 BGR로 변환
-    if image_np.shape[2] == 4:
-        image_rgb = image_np[:, :, :3]  # BGRA -> BGR 변환
-        print("Converted image shape:", image_rgb.shape)
-    else:
-        image_rgb = image_np
+        self.lstm = nn.LSTM(input_size=args.input_size, hidden_size=args.hidden_size, dropout=0.2)
+        self.final = nn.Linear(self.hidden_size, args.output_size, bias=True)
+        self.activation = nn.ReLU()
 
-    results = pose_model.predict(image_rgb, conf=0.5)
-    detections = []
-    for result in results:
-        if result.keypoints is not None:
-            # keypoints의 shape: (num_person, num_keypoints, 3)
-            keypoints = result.keypoints.data.cpu().numpy() if hasattr(result.keypoints, 'cpu') else result.keypoints
-            for person_kps in keypoints:
-                detections.append({"keypoints": person_kps})
-    return detections
+    def forward(self, X, hidden, cell):
+        X = X.unsqueeze(1)  # (batch, sequence_length, input_size)
+        outputs, (hidden, cell) = self.lstm(X, (hidden, cell))
+        model = self.final(outputs[-1])  # 마지막 시점의 출력을 사용
+        return model, hidden, cell
 
-def detect_hand_with_mediapipe(detection, wrist_pos):
-    """Mediapipe Hands를 이용해 손을 검출"""
+    def init_hidden_cell(self, batch_size):
+        h = torch.zeros(1, batch_size, self.hidden_size)        
+        c = torch.zeros(1, batch_size, self.hidden_size)        
+        return h, c
 
-    x, y = int(wrist_pos[0]), int(wrist_pos[1])
-
-    # 손목 기준으로 손 부분을 크롭 (100x100)
-    hand_roi = detection[max(0, y-50):y+100, max(0, x-50):x+100]
-    if hand_roi.size == 0:
-        return None
-
-    hand_roi_rgb = cv2.cvtColor(hand_roi, cv2.COLOR_BGR2RGB)
-    hand_results = hands.process(hand_roi_rgb)
-
-    hand_landmarks_list = []
-    if hand_results.multi_hand_landmarks:
-        for hand_landmarks in hand_results.multi_hand_landmarks:
-            for idx, lm in enumerate(hand_landmarks.landmark):
-                h, w, _ = hand_roi.shape
-                hand_x, hand_y = int(lm.x * w), int(lm.y * h)
-                hand_landmarks_list.append((hand_x + x - 50, hand_y + y - 50))  # 원본 이미지 좌표로 변환
-
-    return hand_landmarks_list
-
-
-def visualize_inference_results(image_np, detections, frame_count):
-    """
-    인퍼런스 결과를 원본 이미지에 그려 시각화합니다.
-    - image_np: 원본 이미지 (numpy 배열, BGR 형식)
-    - detections: perform_person_inference()의 결과
-    - frame_count: 현재 프레임 번호 (디버그용 텍스트 표시)
-    """
-    image_copy = image_np.copy()  # 원본 이미지를 복사하여 수정하지 않도록 함
-
-    if detections is not None:
-        for detection in detections:
-            # 모든 keypoints를 그리기 (신뢰도 0.5 이상)
-            keypoints = detection.get("keypoints", None)
-            if keypoints is not None:
-                left_wrist = keypoints[9][:2]  # 왼손목
-                # right_wrist = keypoints[10][:2]  # 오른손목
-
-                # Mediapipe Hands로 손 keypoints 검출
-                for wrist in [left_wrist]: #, right_wrist]:
-                    hand_landmarks = detect_hand_with_mediapipe(image_np, wrist)
-                    if hand_landmarks:
-                        for (hx, hy) in hand_landmarks:
-                            cv2.circle(image_copy, (hx, hy), 5, (0, 255, 0), -1)  # 초록색 점
-
-                # 손목 위치 시각화 (빨간색 원)
-                cv2.circle(image_copy, (int(left_wrist[0]), int(left_wrist[1])), 5, (0, 0, 255), -1)
-                # cv2.circle(image_copy, (int(right_wrist[0]), int(right_wrist[1])), 5, (0, 0, 255), -1)
-    
-    # 프레임 번호를 이미지에 출력
-    cv2.putText(image_copy, f"Frame: {frame_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-    
-
-    # 이미지를 띄우기 (원본 이미지는 건들지 않고 시각화된 이미지만 띄움)
-    cv2.imshow("YOLOv8-Pose + Mediapipe Hands", image_copy)
-    cv2.waitKey(1)  # 1ms 기다리면서 이미지 띄우기
-
-    return image_np  # 원본 이미지는 그대로 반환
-
-def save_hand_data(csv_writer, wrist_pos, hand_pos):
-    """
-    손목 좌표와 손 좌표를 받아서 CSV 파일에 저장.
-    """
-    timestamp = time.time()
-    vector = (
-        hand_pos[0] - wrist_pos[0],
-        hand_pos[1] - wrist_pos[1],
-        hand_pos[2] - wrist_pos[2]
-    )
-
-    csv_writer.writerow([timestamp, *wrist_pos, *hand_pos, *vector])
-
-    print(f"저장됨: 손목 {wrist_pos}, 손 {hand_pos}, 벡터 {vector}")
-
-def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visualize):
-    """
-    한 프레임을 캡처하여 인퍼런스 수행, 시각화 (옵션) 및 CSV 저장을 처리합니다.
-    반환값: (continue_flag, updated_frame_count)
-    """
-    #좌표 변환 위한 설정
-    camera_points, robot_points = set_points() # 카메라 좌표와 로봇 좌표 설정
-    T = calculate_T(camera_points, robot_points) # 아핀 변환 행렬 계산
-
-    grab_status = zed.grab(runtime_parameters)
-    if grab_status == sl.ERROR_CODE.END_OF_SVOFILE_REACHED:  # 사용 중인 SDK에 따라 END_OF_SVOFILE_REACHED일 수도 있음
-        print("End of SVO file reached.")
-        return False, frame_count
-    elif grab_status != sl.ERROR_CODE.SUCCESS:
-        print("Error during grab:", grab_status)
-        return False, frame_count
-
-    image = sl.Mat()
-    depth = sl.Mat()
-    point_cloud = sl.Mat()
-
-    zed.retrieve_image(image, sl.VIEW.LEFT)
-    zed.retrieve_measure(depth, sl.MEASURE.DEPTH)
-    zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
-
-    # Convert image to numpy array for OpenCV (BGR 형식)
-    image_np = image.get_data()
-
-    # Perform person inference on the image
-    detections = perform_person_inference(image_np)
-
-    # YOLO keypoints와 Mediapipe keypoints 처리
-    if detections:
-        for detection in detections:
-            keypoints = detection.get("keypoints", None)
-            if keypoints is not None:
-                left_wrist = keypoints[9][:2]  # 왼손목 (x, y)
-                right_wrist = keypoints[10][:2]  # 오른손목 (x, y)
-
-                for wrist in [left_wrist, right_wrist]:
-                    x_pixel, y_pixel = int(wrist[0]), int(wrist[1])
-
-                    # 손목 3D 좌표 추출
-                    err, wrist_3d = point_cloud.get_value(x_pixel, y_pixel)
-                    if err == sl.ERROR_CODE.SUCCESS and math.isfinite(wrist_3d[2]):
-                        wrist_robot = transform_camera_to_robot(wrist_3d[:3], T)
-                        
-
-                        print(f"Frame {frame_count}: Wrist at ({x_pixel}, {y_pixel}) -> X: {wrist_robot[0]:.3f}, Y: {wrist_robot[1]:.3f}, Z: {wrist_robot[2]:.3f}")
-                    
-                        # Mediapipe로 손 검출
-                        hand_landmarks = detect_hand_with_mediapipe(image_np, wrist)
-                        if hand_landmarks:
-                            # 손 중심 좌표 계산 (손가락 keypoints의 평균)
-                            hand_x = np.mean([hx for hx, hy in hand_landmarks])
-                            hand_y = np.mean([hy for hx, hy in hand_landmarks])
-
-                            # 손 중심의 3D 좌표 가져오기
-                            err, hand_3d = point_cloud.get_value(int(hand_x), int(hand_y))
-                            if err == sl.ERROR_CODE.SUCCESS and math.isfinite(hand_3d[2]):
-                                hand_robot = transform_camera_to_robot(hand_3d[:3], T)
-
-                                # CSV 저장
-                                save_hand_data(csv_writer, wrist_robot, hand_robot)
-                                print(f"Frame {frame_count}: Wrist {wrist_robot} → Hand {hand_robot}")
-
-
-                    else:
-                        print(f"Frame {frame_count}: Invalid 3D coordinate for wrist at ({x_pixel}, {y_pixel})")
-
-    # 시각화 활성화 시, YOLO + Mediapipe 결과 표시
-    if visualize:
-        image_np = visualize_inference_results(image_np, detections, frame_count)
-
-    frame_count += 1
-    time.sleep(1 / fps)
-    return True, frame_count
-
-def main(visualize, output_path="output.csv"):
+if __name__=="__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input_svo_file', type=str, required=True, help='Path to the input SVO file')
-    parser.add_argument('--fps', type=int, default=30, help='Frames per second to process')
-    parser.add_argument('--visualize', action='store_true', help='Flag to enable visualization of inference results')
+    parser.add_argument('--hidden_size', type=int, default=64, help='hidden_size')
+    parser.add_argument('--input_size', type=int, default=7, help='input_size (X, Y, Z, Roll, Pitch, Yaw, t)')
+    parser.add_argument('--output_size', type=int, default=7, help='output_size (ΔX, ΔY, ΔZ, ΔRoll, ΔPitch, ΔYaw, Δt)')
+    parser.add_argument('--batch_size', type=int, default=1, help='batch_size')
+    parser.add_argument('--epochs', type=int, default=10, help='number of epochs')
+    parser.add_argument('--file_name', type=str, default='test', help="model's path will be generated in this file")
     args = parser.parse_args()
-    
-    print("Starting 3D Coordinate Extraction from SVO file")
-    
-    # Create a Camera object and initialize with SVO file
-    zed = sl.Camera()
-    init_params = sl.InitParameters()
-    init_params.depth_mode = sl.DEPTH_MODE.ULTRA
-    init_params.coordinate_units = sl.UNIT.MILLIMETER
-    init_params.set_from_svo_file(args.input_svo_file)
-    
-    status = zed.open(init_params)
-    if status != sl.ERROR_CODE.SUCCESS:
-        print("Camera Open:", repr(status), ". Exit program.")
-        sys.exit(1)
-    
-    runtime_parameters = sl.RuntimeParameters()
-    
-    # Open CSV file (columns: timestamp, x, y, z, p, r, l)
-    csv_file = open(output_path, "w", newline="")
-    csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(["Timestamp", "WX", "WY", "WZ", "HX", "HY", "HZ", "VX", "VY", "VZ"])
-    
-    frame_count = 0
-    continue_processing = True
-    try:
-        while continue_processing:
-            continue_processing, frame_count = process_frame(zed, runtime_parameters, args.fps, csv_writer, frame_count, visualize==True)
-    except KeyboardInterrupt:
-        print("Processing stopped by user.")
-    finally:
-        csv_file.close()
-        zed.close()
-        cv2.destroyAllWindows()
-        print("Processing complete. Total frames processed:", frame_count)
 
-if __name__ == "__main__":
-    output_path = "output.csv"
-    visualize = True
-    main(visualize, output_path)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using {device} device")
+
+    # CSV 데이터를 기반으로 학습 데이터 생성
+    actions_dataset = XArmDataset(path='/Users/cdt/Downloads/0310_data', sequence_length=5)
+
+    # 모델 설정
+    model = SimpleLearner(args).to(device)
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1.5e-1)
+    num_epochs = args.epochs
+
+    train_loader = DataLoader(actions_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
+
+    # 모델 학습
+    for epoch in range(num_epochs):
+        for coordinates, next_coordinates in train_loader:
+            hidden, cell = model.init_hidden_cell(args.batch_size)
+            hidden, cell = hidden.to(device), cell.to(device)
+            coordinates, next_coordinates = coordinates.to(device), next_coordinates.to(device)
+            
+            optimizer.zero_grad()
+            output, hidden, cell = model(coordinates, hidden, cell)
+            loss = criterion(output, next_coordinates)
+            loss.backward()
+            optimizer.step()
+
+        if (epoch + 1) % (num_epochs // 10) == 0:
+            print(f'Epoch {epoch+1}, Loss: {loss.item():.6f}')
+
+    # 모델 추론
+    inference_data = []
+    initial_position = torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32).to(device)
+    poss = initial_position
+    h, c = model.init_hidden_cell(args.batch_size)
+    h, c = h.to(device), c.to(device)
+
+    for i in range(60):
+        predict, h, c = model(poss, h, c)
+        poss = predict
+        print(f"Prediction {i}: {poss}")
+
+        result = predict.cpu().detach().numpy()[0]
+        inference_data.append(result.tolist())
+
+    # CSV 파일로 저장
+    output_csv_path = os.path.join("/Users/cdt/Downloads/0310_data", args.file_name + '.csv')
+    with open(output_csv_path, 'w', newline='') as csvfile:
+        fieldnames = ['timestamp', 'x', 'y', 'z', 'roll', 'pitch', 'yaw']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        
+        for i, point in enumerate(inference_data):
+            data = {k: 0. for k in fieldnames}
+            data['timestamp'] = i * 0.1  # 시간 증가량
+            data['x'] = point[0]
+            data['y'] = point[1]
+            data['z'] = point[2]
+            data['roll'] = point[3]
+            data['pitch'] = point[4]
+            data['yaw'] = point[5]
+            writer.writerow(data)
+
+    print(f"Saved inference results to {output_csv_path}")
