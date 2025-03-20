@@ -8,7 +8,7 @@ from ultralytics import YOLO
 import csv
 import cv2
 import mediapipe as mp
-from CoordinateTransform import transform_camera_to_robot, calculate_T, set_points
+from CoordinateTransform import transform_camera_to_robot, calculate_T, set_points, undistort_points
 
 # YOLOv8-Pose 모델 로드
 pose_model = YOLO("C:/Users/PDI/Downloads/yolov8n-pose.pt")
@@ -66,11 +66,12 @@ def visualize_inference_results(image_np, detections, frame_count,target_mode):
     """
     YOLO + Mediapipe 결과를 시각화하여 화면에 표시
     """
+
     image_copy = image_np.copy()
     if detections is not None:
         for detection in detections:
             keypoints = detection.get("keypoints", None)
-            if keypoints is not None:
+            if keypoints is not None and len(keypoints) >= 10:
                 left_wrist = keypoints[9][:2]  # 왼손목
                 # right_wrist = keypoints[10][:2]  # 필요시 활성화
                 if target_mode == 'hand':
@@ -80,7 +81,7 @@ def visualize_inference_results(image_np, detections, frame_count,target_mode):
                             for (hx, hy) in hand_landmarks:
                                 cv2.circle(image_copy, (hx, hy), 5, (0, 255, 0), -1)
                     # 손목 위치 시각화 (빨간색 원)
-                    cv2.circle(image_copy, (int(left_wrist[0]), int(left_wrist[1])), 5, (0, 0, 255), -1)
+                cv2.circle(image_copy, (int(left_wrist[0]), int(left_wrist[1])), 5, (0, 0, 255), -1)
 
     cv2.putText(image_copy, f"Frame: {frame_count}", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
@@ -88,13 +89,17 @@ def visualize_inference_results(image_np, detections, frame_count,target_mode):
     cv2.waitKey(1)
     return image_np
 
+start_time = None  
 def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visualize, target_mode, pry_default):
     """
     한 프레임씩 캡처 -> 인퍼런스 -> (손목/손) 3D 좌표 계산 -> CSV 저장
     target_mode: "wrist" 또는 "hand"
     """
+    global start_time
+
     # 좌표 변환 행렬 준비
     camera_points, robot_points = set_points()
+    camera_points = undistort_points(camera_points) # 왜곡 보정
     T = calculate_T(camera_points, robot_points)
 
     grab_status = zed.grab(runtime_parameters)
@@ -122,7 +127,7 @@ def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visuali
     if detections:
         for detection in detections:
             keypoints = detection.get("keypoints", None)
-            if keypoints is not None:
+            if keypoints is not None and len(keypoints) >= 10:
                 # 왼손목, 오른손목 픽셀 좌표
                 left_wrist = keypoints[9][:2]
                 right_wrist = keypoints[10][:2]
@@ -141,7 +146,9 @@ def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visuali
                         # (1) wrist 모드:
                         #     손목 인식 -> 변환행렬 적용 -> 손목 (x,y,z) CSV 저장
                         if target_mode == 'wrist':
-                            timestamp = time.time()
+                            if start_time == None:
+                                start_time = time.time()
+                            timestamp = start_time + frame_count / fps  # 일정한 간격 유지
                             csv_writer.writerow([
                                 timestamp,
                                 wrist_robot[0], wrist_robot[1], wrist_robot[2],
@@ -164,7 +171,9 @@ def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visuali
                                 if (err_h == sl.ERROR_CODE.SUCCESS 
                                     and math.isfinite(hand_3d[2])):
                                     hand_robot = transform_camera_to_robot(hand_3d[:3], T)
-                                    timestamp = time.time()
+                                    if start_time == None:
+                                        start_time = time.time()
+                                    timestamp = start_time + frame_count / fps  # 일정한 간격 유지
                                     csv_writer.writerow([
                                         timestamp,
                                         hand_robot[0], hand_robot[1], hand_robot[2],
@@ -192,10 +201,10 @@ def main():
                         help='Path to the input SVO file')
     parser.add_argument('--fps', type=int, default=30,
                         help='Frames per second to process')
-    parser.add_argument('--visualize', action='store_true',
-                        help='Flag to enable visualization of inference results')
+    #parser.add_argument('--visualize', action='store_true',
+    #                    help='Flag to enable visualization of inference results')
     # 손목만 기록할지, 손만 기록할지를 선택
-    parser.add_argument('--target', type=str, required=True, choices=['wrist', 'hand'],default='hand',
+    parser.add_argument('--target', type=str, choices=['wrist', 'hand'],default='wrist',
                         help='Choose which to record: "wrist" or "hand"')
     parser.add_argument('--output_csv', type=str, default='output.csv',
                         help='Output CSV file path')
@@ -206,8 +215,6 @@ def main():
 
     #---------------설정----------------
     visualize = True
-    target = hand
-    output_csv = "output.csv"
     pry_default = [-91.5, -7, -91.9]
     #----------------------------------
 
@@ -242,7 +249,7 @@ def main():
         while continue_processing:
             continue_processing, frame_count = process_frame(
                 zed, runtime_parameters, args.fps, csv_writer, frame_count,
-                visualize=args.visualize, target_mode=args.target,
+                visualize=visualize, target_mode=args.target,
                 pry_default = pry_default
             )
     except KeyboardInterrupt:
