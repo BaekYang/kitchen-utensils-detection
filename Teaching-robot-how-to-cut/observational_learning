@@ -1,3 +1,5 @@
+# python observational_learning.py --input_svo_file "C:\Users\PDI\Downloads\0322_testRec\test1.svo123" --target hand
+
 import pyzed.sl as sl
 import math
 import numpy as np
@@ -73,7 +75,7 @@ def visualize_inference_results(image_np, detections, frame_count,target_mode):
             keypoints = detection.get("keypoints", None)
             if keypoints is not None and len(keypoints) >= 10:
                 left_wrist = keypoints[9][:2]  # 왼손목
-                # right_wrist = keypoints[10][:2]  # 필요시 활성화
+                
                 if target_mode == 'hand':
                     for wrist in [left_wrist]:  # 필요시 오른손목도 추가
                         hand_landmarks = detect_hand_with_mediapipe(image_np, wrist)
@@ -121,6 +123,16 @@ def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visuali
     # OpenCV용 numpy 배열
     image_np = image.get_data()
 
+    if start_time == None:
+        start_time = time.time()
+    timestamp = start_time + frame_count / fps  # 일정한 간격 유지
+
+    row_data = [
+        timestamp,
+        float('nan'), float('nan'), float('nan'),  # x, y, z 기본값 NaN
+        pry_default[0], pry_default[1], pry_default[2]  # roll, pitch, yaw
+    ]
+
     # YOLO-Pose 추론
     detections = perform_person_inference(image_np)
 
@@ -128,69 +140,55 @@ def process_frame(zed, runtime_parameters, fps, csv_writer, frame_count, visuali
         for detection in detections:
             keypoints = detection.get("keypoints", None)
             if keypoints is not None and len(keypoints) >= 10:
-                # 왼손목, 오른손목 픽셀 좌표
+                # 왼손목픽셀 좌표
                 left_wrist = keypoints[9][:2]
-                right_wrist = keypoints[10][:2]
+    
+                x_pixel, y_pixel = int(left_wrist[0]), int(left_wrist[1])
+                err, wrist_3d = point_cloud.get_value(x_pixel, y_pixel)
+                # 3D 좌표 유효성 체크
+                if err == sl.ERROR_CODE.SUCCESS and math.isfinite(wrist_3d[2]):
+                    # 로봇 좌표계로 변환
+                    wrist_robot = transform_camera_to_robot(wrist_3d[:3], T)
+                    print(f"[Frame {frame_count}] Wrist => {wrist_robot}")
 
-                # 손목(들)을 순회
-                for wrist in [left_wrist, right_wrist]:
-                    x_pixel, y_pixel = int(wrist[0]), int(wrist[1])
-                    err, wrist_3d = point_cloud.get_value(x_pixel, y_pixel)
-                    # 3D 좌표 유효성 체크
-                    if err == sl.ERROR_CODE.SUCCESS and math.isfinite(wrist_3d[2]):
-                        # 로봇 좌표계로 변환
-                        wrist_robot = transform_camera_to_robot(wrist_3d[:3], T)
-                        print(f"[Frame {frame_count}] Wrist => {wrist_robot}")
+                    # ---------------------
+                    # (1) wrist 모드:
+                    #     손목 인식 -> 변환행렬 적용 -> 손목 (x,y,z) CSV 저장
+                    if target_mode == 'wrist':
+                        row_data[1] = wrist_robot[0]
+                        row_data[2] = wrist_robot[1]
+                        row_data[3] = wrist_robot[2]
+                        print(f"저장(손목): {wrist_robot}")
 
-                        # ---------------------
-                        # (1) wrist 모드:
-                        #     손목 인식 -> 변환행렬 적용 -> 손목 (x,y,z) CSV 저장
-                        if target_mode == 'wrist':
-                            if start_time == None:
-                                start_time = time.time()
-                            timestamp = start_time + frame_count / fps  # 일정한 간격 유지
-                            csv_writer.writerow([
-                                timestamp,
-                                wrist_robot[0], wrist_robot[1], wrist_robot[2],
-                                pry_default[0], pry_default[1], pry_default[2]
-                            ])
-                            print(f"저장(손목): {wrist_robot}")
+                    # ---------------------
+                    # (2) hand 모드:
+                    #     손목 인식 -> 손 인식 -> 변환행렬 -> 손 (x,y,z) CSV 저장
+                    elif target_mode == 'hand':
+                        # Mediapipe로 손 키포인트 검출
+                        hand_landmarks = detect_hand_with_mediapipe(image_np, left_wrist)
+                        if hand_landmarks:
+                            # 손가락 키포인트 평균 => 손 중심
+                            hand_x = np.mean([hx for hx, hy in hand_landmarks])
+                            hand_y = np.mean([hy for hx, hy in hand_landmarks])
 
-                        # ---------------------
-                        # (2) hand 모드:
-                        #     손목 인식 -> 손 인식 -> 변환행렬 -> 손 (x,y,z) CSV 저장
-                        elif target_mode == 'hand':
-                            # Mediapipe로 손 키포인트 검출
-                            hand_landmarks = detect_hand_with_mediapipe(image_np, wrist)
-                            if hand_landmarks:
-                                # 손가락 키포인트 평균 => 손 중심
-                                hand_x = np.mean([hx for hx, hy in hand_landmarks])
-                                hand_y = np.mean([hy for hx, hy in hand_landmarks])
+                            err_h, hand_3d = point_cloud.get_value(int(hand_x), int(hand_y))
+                            if (err_h == sl.ERROR_CODE.SUCCESS 
+                                and math.isfinite(hand_3d[2])):
+                                hand_robot = transform_camera_to_robot(hand_3d[:3], T)
+                                row_data[1] = hand_robot[0]
+                                row_data[2] = hand_robot[1]
+                                row_data[3] = hand_robot[2]
+                                print(f"저장(손): {hand_robot}")
+                        else:
+                            print(f"[Frame {frame_count}] 손 인식 실패")
 
-                                err_h, hand_3d = point_cloud.get_value(int(hand_x), int(hand_y))
-                                if (err_h == sl.ERROR_CODE.SUCCESS 
-                                    and math.isfinite(hand_3d[2])):
-                                    hand_robot = transform_camera_to_robot(hand_3d[:3], T)
-                                    if start_time == None:
-                                        start_time = time.time()
-                                    timestamp = start_time + frame_count / fps  # 일정한 간격 유지
-                                    csv_writer.writerow([
-                                        timestamp,
-                                        hand_robot[0], hand_robot[1], hand_robot[2],
-                                        pry_default[0], pry_default[1], pry_default[2]
-                
-                                    ])
-                                    print(f"저장(손): {hand_robot}")
-                            else:
-                                print(f"[Frame {frame_count}] 손 인식 실패")
-
-                    else:
-                        print(f"[Frame {frame_count}] 손목 유효 3D 좌표 없음")
+                else:
+                    print(f"[Frame {frame_count}] 손목 유효 3D 좌표 없음")
 
     # 시각화
     if visualize:
         image_np = visualize_inference_results(image_np, detections, frame_count, target_mode)
-
+    csv_writer.writerow(row_data)
     frame_count += 1
     time.sleep(1 / fps)
     return True, frame_count
@@ -206,8 +204,8 @@ def main():
     # 손목만 기록할지, 손만 기록할지를 선택
     parser.add_argument('--target', type=str, choices=['wrist', 'hand'],default='wrist',
                         help='Choose which to record: "wrist" or "hand"')
-    parser.add_argument('--output_csv', type=str, default='output.csv',
-                        help='Output CSV file path')
+    #parser.add_argument('--output_csv', type=str, default='output.csv',
+    #                    help='Output CSV file path')
     args = parser.parse_args()
     
     print("Starting 3D Coordinate Extraction from SVO file")
@@ -215,7 +213,8 @@ def main():
 
     #---------------설정----------------
     visualize = True
-    pry_default = [-91.5, -7, -91.9]
+    pry_default = [-157, -83, -25]  #rpy
+    output_csv = 'C:\Users\PDI\Downloads\test\test.csv'
     #----------------------------------
 
     # ZED 카메라 초기화
